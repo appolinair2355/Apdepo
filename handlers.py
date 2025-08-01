@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 # Rate limiting storage
 user_message_counts = defaultdict(list)
 
+# Target channel ID for Baccarat Kouamé
+TARGET_CHANNEL_ID = -1002682552255
+
 # Configuration constants
 GREETING_MESSAGE = """
 🎭 Salut ! Je suis le bot de Joker !
@@ -91,7 +94,7 @@ contactez l'administrateur du bot.
 🚀 Le bot est open source et peut être déployé facilement !
 """
 
-MAX_MESSAGES_PER_MINUTE = 10
+MAX_MESSAGES_PER_MINUTE = 30
 RATE_LIMIT_WINDOW = 60
 
 def is_rate_limited(user_id: int) -> bool:
@@ -118,16 +121,27 @@ class TelegramHandlers:
         self.bot_token = bot_token
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         self.deployment_file_path = "deployment.zip"
+        # Import card_predictor locally to avoid circular imports
+        try:
+            from card_predictor import card_predictor
+            self.card_predictor = card_predictor
+        except ImportError:
+            logger.error("Failed to import card_predictor")
+            self.card_predictor = None
         
     def handle_update(self, update: Dict[str, Any]) -> None:
-        """Handle incoming Telegram update"""
+        """Handle incoming Telegram update with enhanced webhook support"""
         try:
             if 'message' in update:
                 message = update['message']
+                logger.info(f"🔄 Handlers - Traitement message normal")
                 self._handle_message(message)
             elif 'edited_message' in update:
                 message = update['edited_message']
+                logger.info(f"🔄 Handlers - Traitement message édité pour prédictions/vérifications")
                 self._handle_edited_message(message)
+            else:
+                logger.info(f"⚠️ Type d'update non géré: {list(update.keys())}")
                 
         except Exception as e:
             logger.error(f"Error handling update: {e}")
@@ -138,8 +152,9 @@ class TelegramHandlers:
             chat_id = message['chat']['id']
             user_id = message.get('from', {}).get('id')
             
-            # Rate limiting check
-            if user_id and is_rate_limited(user_id):
+            # Rate limiting check (skip for channels/groups)
+            chat_type = message['chat'].get('type', 'private')
+            if user_id and chat_type == 'private' and is_rate_limited(user_id):
                 self.send_message(chat_id, "⏰ Veuillez patienter avant d'envoyer une autre commande.")
                 return
             
@@ -157,9 +172,15 @@ class TelegramHandlers:
                     self.send_message(chat_id, DEV_MESSAGE)
                 elif text == '/deploy':
                     self._handle_deploy_command(chat_id)
+                elif text == '/deploy':
+                    self._handle_deploy_command(chat_id)
                 else:
-                    # Handle regular messages
+                    # Handle regular messages - check for card predictions even in regular messages
                     self._handle_regular_message(message)
+                    
+                    # Also process for card prediction in channels/groups (for polling mode)
+                    if chat_type in ['group', 'supergroup', 'channel'] and self.card_predictor:
+                        self._process_card_message(message)
             
             # Handle new chat members
             if 'new_chat_members' in message:
@@ -169,22 +190,154 @@ class TelegramHandlers:
             logger.error(f"Error handling message: {e}")
     
     def _handle_edited_message(self, message: Dict[str, Any]) -> None:
-        """Handle edited messages"""
+        """Handle edited messages with enhanced webhook processing for predictions and verification"""
         try:
             chat_id = message['chat']['id']
+            chat_type = message['chat'].get('type', 'private')
             user_id = message.get('from', {}).get('id')
+            message_id = message.get('message_id')
+            sender_chat = message.get('sender_chat', {})
+            sender_chat_id = sender_chat.get('id')
             
-            # Rate limiting check
-            if user_id and is_rate_limited(user_id):
+            logger.info(f"✏️ WEBHOOK - Message édité reçu ID:{message_id} | Chat:{chat_id} | Sender:{sender_chat_id}")
+            
+            # Rate limiting check (skip for channels/groups)
+            if user_id and chat_type == 'private' and is_rate_limited(user_id):
                 return
             
-            # Process edited messages for card predictions
+            # Process edited messages
             if 'text' in message:
-                # Here you could add card prediction logic
-                logger.info(f"Edited message in chat {chat_id}: {message['text'][:50]}...")
+                text = message['text']
+                logger.info(f"✏️ WEBHOOK - Contenu édité: {text[:100]}...")
+                
+                # Skip card prediction if card_predictor is not available
+                if not self.card_predictor:
+                    logger.warning("❌ Card predictor not available")
+                    return
+                
+                # Vérifier que c'est du canal autorisé
+                if sender_chat_id != TARGET_CHANNEL_ID:
+                    logger.info(f"🚫 Message édité ignoré - Canal non autorisé: {sender_chat_id}")
+                    return
+                
+                logger.info(f"✅ WEBHOOK - Message édité du canal autorisé: {TARGET_CHANNEL_ID}")
+                
+                # TRAITEMENT MESSAGES ÉDITÉS - Les deux systèmes fonctionnent ici
+                if self.card_predictor.has_completion_indicators(text):
+                    logger.info(f"🎯 ÉDITION - Message finalisé détecté, traitement des deux systèmes")
+                    
+                    # SYSTÈME 1: PRÉDICTION AUTOMATIQUE (SEULEMENT sur messages édités)
+                    should_predict, game_number, combination = self.card_predictor.should_predict(text)
+                    
+                    if should_predict and game_number is not None and combination is not None:
+                        prediction = self.card_predictor.make_prediction(game_number, combination)
+                        logger.info(f"🔮 PRÉDICTION depuis ÉDITION: {prediction}")
+                        
+                        # Envoyer la prédiction et stocker pour futures vérifications
+                        sent_message_info = self.send_message(chat_id, prediction)
+                        if sent_message_info and isinstance(sent_message_info, dict) and 'message_id' in sent_message_info:
+                            next_game = game_number + 1
+                            self.card_predictor.sent_predictions[next_game] = {
+                                'chat_id': chat_id,
+                                'message_id': sent_message_info['message_id']
+                            }
+                            logger.info(f"📝 Prédiction stockée pour jeu {next_game}")
+                    
+                    # SYSTÈME 2: VÉRIFICATION (SEULEMENT sur messages édités)
+                    verification_result = self.card_predictor.verify_prediction_from_edit(text)
+                    if verification_result:
+                        logger.info(f"🔍 VÉRIFICATION depuis ÉDITION: {verification_result}")
+                        if verification_result['type'] == 'update_message':
+                            # Essayer d'éditer le message original de prédiction
+                            predicted_game = verification_result['predicted_game']
+                            if predicted_game in self.card_predictor.sent_predictions:
+                                message_info = self.card_predictor.sent_predictions[predicted_game]
+                                edit_success = self.edit_message(
+                                    message_info['chat_id'],
+                                    message_info['message_id'],
+                                    verification_result['new_message']
+                                )
+                                if edit_success:
+                                    logger.info(f"✅ Message de prédiction édité pour jeu {predicted_game}")
+                                else:
+                                    self.send_message(chat_id, verification_result['new_message'])
+                            else:
+                                self.send_message(chat_id, verification_result['new_message'])
+                
+                # Gestion des messages temporaires
+                elif self.card_predictor.has_pending_indicators(text):
+                    logger.info(f"⏰ WEBHOOK - Message temporaire détecté, en attente de finalisation")
+                    if message_id:
+                        self.card_predictor.pending_edits[message_id] = {
+                            'original_text': text,
+                            'timestamp': datetime.now()
+                        }
                 
         except Exception as e:
-            logger.error(f"Error handling edited message: {e}")
+            logger.error(f"❌ Error handling edited message via webhook: {e}")
+    
+    def _process_card_message(self, message: Dict[str, Any]) -> None:
+        """Process message for card prediction (works for both regular and edited messages)"""
+        try:
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            sender_chat = message.get('sender_chat', {})
+            sender_chat_id = sender_chat.get('id')
+            
+            # Only process messages from Baccarat Kouamé channel
+            if sender_chat_id != TARGET_CHANNEL_ID:
+                logger.info(f"🚫 Message ignoré - Canal non autorisé: {sender_chat_id} (attendu: {TARGET_CHANNEL_ID})")
+                return
+                
+            if not text or not self.card_predictor:
+                return
+                
+            logger.info(f"🎯 Traitement message CANAL AUTORISÉ pour prédiction: {text[:50]}...")
+            logger.info(f"📍 Canal source: {sender_chat_id} | Chat destination: {chat_id}")
+            
+            # IMPORTANT: Les messages normaux ne font PAS de prédiction ni de vérification
+            # Seuls les messages ÉDITÉS déclenchent les systèmes de prédiction et vérification
+            logger.info(f"📨 Message normal - AUCUNE ACTION (prédiction et vérification se font SEULEMENT sur messages édités)")
+            
+            # Store temporary messages with pending indicators
+            if self.card_predictor.has_pending_indicators(text):
+                message_id = message.get('message_id')
+                if message_id:
+                    self.card_predictor.temporary_messages[message_id] = text
+                    logger.info(f"⏰ Message temporaire stocké: {message_id}")
+                
+        except Exception as e:
+            logger.error(f"Error processing card message: {e}")
+    
+    def _process_completed_edit(self, message: Dict[str, Any]) -> None:
+        """Process a message that was edited and now contains completion indicators"""
+        try:
+            chat_id = message['chat']['id']
+            chat_type = message['chat'].get('type', 'private')
+            text = message['text']
+            
+            # Only process in groups/channels
+            if chat_type in ['group', 'supergroup', 'channel'] and self.card_predictor:
+                # Check if we should make a prediction from this completed edit
+                should_predict, game_number, combination = self.card_predictor.should_predict(text)
+                
+                if should_predict and game_number is not None and combination is not None:
+                    prediction = self.card_predictor.make_prediction(game_number, combination)
+                    logger.info(f"Making prediction from completed edit: {prediction}")
+                    
+                    # Send prediction to the chat
+                    self.send_message(chat_id, prediction)
+                
+                # Also check for verification with enhanced logic for edited messages
+                verification_result = self.card_predictor.verify_prediction_from_edit(text)
+                if verification_result:
+                    logger.info(f"Verification from completed edit: {verification_result}")
+                    
+                    if verification_result['type'] == 'update_message':
+                        self.send_message(chat_id, verification_result['new_message'])
+                        
+        except Exception as e:
+            logger.error(f"Error processing completed edit: {e}")
     
     def _handle_start_command(self, chat_id: int) -> None:
         """Handle /start command"""
@@ -195,52 +348,36 @@ class TelegramHandlers:
             self.send_message(chat_id, "❌ Une erreur s'est produite. Veuillez réessayer.")
     
     def _handle_deploy_command(self, chat_id: int) -> None:
-        """Handle /deploy command by sending deployment zip file"""
+        """Handle /deploy command - send deployment files"""
         try:
-            # Send initial message
-            self.send_message(
-                chat_id, 
-                "🚀 Préparation du fichier de déploiement... Veuillez patienter."
-            )
-            
             # Check if deployment file exists
-            if not os.path.exists(self.deployment_file_path):
-                self.send_message(
-                    chat_id,
-                    "❌ Fichier de déploiement non trouvé. Contactez l'administrateur."
-                )
-                logger.error(f"Deployment file {self.deployment_file_path} not found")
-                return
-            
-            # Send the file
-            success = self.send_document(chat_id, self.deployment_file_path)
-            
-            if success:
-                self.send_message(
-                    chat_id,
-                    "✅ Fichier de déploiement envoyé avec succès !\n\n"
-                    "📋 Instructions de déploiement :\n"
-                    "1. Téléchargez le fichier zip\n"
-                    "2. Créez un nouveau service sur render.com\n"
-                    "3. Uploadez le zip ou connectez votre repository\n"
-                    "4. Configurez les variables d'environnement :\n"
-                    "   - BOT_TOKEN : Votre token de bot\n"
-                    "   - WEBHOOK_URL : https://votre-app.onrender.com\n"
-                    "   - PORT : 10000\n\n"
-                    "🎯 Votre bot sera déployé automatiquement !"
-                )
+            deployment_file = "deployment.zip"
+            if os.path.exists(deployment_file):
+                logger.info(f"📦 Envoi du fichier de déploiement à {chat_id}")
+                self.send_message(chat_id, 
+                    "📦 Voici le pack de déploiement complet pour Render.com !\n\n"
+                    "🎯 Contient :\n"
+                    "• Tous les fichiers Python optimisés\n"
+                    "• Configuration Render.com (render.yaml)\n"
+                    "• Dépendances (requirements.txt)\n"
+                    "• Guide de déploiement (README.md)\n\n"
+                    "🚀 Prêt à déployer directement sur Render.com !")
+                
+                # Send the deployment file
+                success = self.send_document(chat_id, deployment_file)
+                if success:
+                    logger.info(f"✅ Fichier de déploiement envoyé avec succès à {chat_id}")
+                else:
+                    self.send_message(chat_id, "❌ Erreur lors de l'envoi du fichier. Veuillez réessayer.")
             else:
-                self.send_message(
-                    chat_id,
-                    "❌ Échec de l'envoi du fichier. Réessayez plus tard."
-                )
+                self.send_message(chat_id, 
+                    "❌ Fichier de déploiement non trouvé.\n"
+                    "Contactez l'administrateur pour obtenir le pack de déploiement.")
+                logger.error(f"❌ Fichier de déploiement non trouvé: {deployment_file}")
                 
         except Exception as e:
-            logger.error(f"Error handling deploy command: {e}")
-            self.send_message(
-                chat_id,
-                "❌ Une erreur s'est produite lors du traitement de votre demande."
-            )
+            logger.error(f"Error in deploy command: {e}")
+            self.send_message(chat_id, "❌ Une erreur s'est produite lors de l'envoi du déploiement.")
     
     def _handle_regular_message(self, message: Dict[str, Any]) -> None:
         """Handle regular text messages"""
@@ -248,6 +385,7 @@ class TelegramHandlers:
             chat_id = message['chat']['id']
             chat_type = message['chat'].get('type', 'private')
             text = message.get('text', '')
+            message_id = message.get('message_id')
             
             # In private chats, provide help
             if chat_type == 'private':
@@ -259,9 +397,16 @@ class TelegramHandlers:
                 )
             
             # In groups/channels, analyze for card patterns
-            elif chat_type in ['group', 'supergroup', 'channel']:
-                # Here you could add card prediction logic
-                # For now, just log the activity
+            elif chat_type in ['group', 'supergroup', 'channel'] and self.card_predictor:
+                # Check if this message has pending indicators
+                if message_id and self.card_predictor.should_wait_for_edit(text, message_id):
+                    logger.info(f"Message {message_id} has pending indicators, waiting for edit: {text[:50]}...")
+                    # Don't process for predictions yet, wait for the edit
+                    return
+                
+                # Les messages normaux dans les groupes/canaux ne font PAS de prédiction ni vérification
+                # Seuls les messages ÉDITÉS déclenchent les systèmes
+                logger.info(f"📨 Message normal groupe/canal - AUCUNE ACTION (systèmes actifs seulement sur éditions)")
                 logger.info(f"Group message in {chat_id}: {text[:50]}...")
                 
         except Exception as e:
@@ -296,12 +441,12 @@ class TelegramHandlers:
                 'parse_mode': 'HTML'
             }
             
-            response = requests.post(url, json=data, timeout=30)
+            response = requests.post(url, json=data, timeout=10)
             result = response.json()
             
             if result.get('ok'):
                 logger.info(f"Message sent successfully to chat {chat_id}")
-                return True
+                return result.get('result', {})  # Return message info including message_id
             else:
                 logger.error(f"Failed to send message: {result}")
                 return False
@@ -341,4 +486,31 @@ class TelegramHandlers:
             return False
         except Exception as e:
             logger.error(f"Error sending document: {e}")
+            return False
+    
+    def edit_message(self, chat_id: int, message_id: int, new_text: str) -> bool:
+        """Edit an existing message"""
+        try:
+            import requests
+            
+            url = f"{self.base_url}/editMessageText"
+            data = {
+                'chat_id': chat_id,
+                'message_id': message_id,
+                'text': new_text,
+                'parse_mode': 'HTML'
+            }
+            
+            response = requests.post(url, json=data, timeout=10)
+            result = response.json()
+            
+            if result.get('ok'):
+                logger.info(f"Message edited successfully in chat {chat_id}")
+                return True
+            else:
+                logger.error(f"Failed to edit message: {result}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
             return False

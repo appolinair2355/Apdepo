@@ -1,5 +1,5 @@
 """
-Configuration settings for the Telegram bot
+Configuration settings for Telegram bot on Render.com
 """
 import os
 import logging
@@ -7,11 +7,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 class Config:
-    """Configuration class for bot settings"""
+    """Configuration class optimized for Render.com deployment"""
     
     def __init__(self):
         self.BOT_TOKEN = self._get_bot_token()
+        # Webhook URL for Render.com (no fallback to repl.co)
         self.WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+        # Port for Render.com (uses dynamic PORT environment variable)
         self.PORT = int(os.getenv('PORT', 10000))
         self.DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
         
