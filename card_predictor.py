@@ -125,235 +125,344 @@ class CardPredictor:
             logger.info(f"Accepting 3 different cards as valid: {combination}")
             return combination
         return None
-    
-    def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str]]:
-        """
-        SYSTÈME DE PRÉDICTION - Détermine si on doit faire une NOUVELLE prédiction (+1)
-        Returns: (should_predict, game_number, card_combination)
-        """
-        # Extract game number
-        game_number = self.extract_game_number(message)
-        if not game_number:
-            return False, None, None
-        
-        logger.debug(f"🔮 PRÉDICTION - Analyse du jeu {game_number}")
-        
-        # Check if this is a temporary message (should wait for final edit)
-        if self.has_pending_indicators(message) and not self.has_completion_indicators(message):
-            logger.info(f"🔮 Jeu {game_number}: Message temporaire (⏰▶🕐➡️), attente finalisation")
-            self.temporary_messages[game_number] = message
-            return False, None, None
+        def _handle_edited_message(self, message: Dict[str, Any]) -> None:
+        """Handle edited messages with enhanced webhook processing for predictions and verification"""
+        try:
+            chat_id = message['chat']['id']
+            chat_type = message['chat'].get('type', 'private')
+            user_id = message.get('from', {}).get('id')
+            message_id = message.get('message_id')
+            sender_chat = message.get('sender_chat', {})
+            sender_chat_id = sender_chat.get('id')
             
-        # Skip if we already have a prediction for this exact next game number
-        next_game = game_number + 1
-        if next_game in self.predictions and self.predictions[next_game].get('status') == 'pending':
-            logger.info(f"🔮 Jeu {game_number}: Prédiction N{next_game} déjà existante, éviter doublon")
-            return False, None, None
-        
-        # Check if this is a final message (has completion indicators)
-        if self.has_completion_indicators(message):
-            logger.info(f"🔮 Jeu {game_number}: Message final détecté (✅ ou 🔰)")
-            # Remove from temporary if it was there
-            if game_number in self.temporary_messages:
-                del self.temporary_messages[game_number]
-                logger.info(f"🔮 Jeu {game_number}: Retiré des messages temporaires")
-        
-        # Si le message a encore des indicateurs d'attente, ne pas traiter
-        elif self.has_pending_indicators(message):
-            logger.info(f"🔮 Jeu {game_number}: Encore des indicateurs d'attente, pas de prédiction")
-            return False, None, None
-        
-        # Extract card symbols from each parentheses section
-        parentheses_sections = self.extract_card_symbols_from_parentheses(message)
-        if not parentheses_sections:
-            logger.info(f"🔮 Jeu {game_number}: Aucune parenthèse trouvée")
-            return False, None, None
-        
-        # SYSTÈME DE PRÉDICTION: Check if ANY parentheses section has exactly 3 different costumes
-        # Optimisation : vérification rapide pour éviter trop de logs
-        for i, section_symbols in enumerate(parentheses_sections):
-            if len(section_symbols) == 3:
-                # Found a section with 3 different costumes - GENERATE PREDICTION FOR NEXT GAME
-                combination = ''.join(sorted(section_symbols))
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ✅ 3 costumes trouvés dans parenthèse {i+1}: {section_symbols}")
-                logger.info(f"🔮 RÈGLE PRÉDICTION RESPECTÉE: N'importe quelle parenthèse avec 3 costumes → génère prédiction pour jeu {game_number + 1}")
+            logger.info(f"✏️ WEBHOOK - Message édité reçu ID:{message_id} | Chat:{chat_id} | Sender:{sender_chat_id}")
+            
+            # Rate limiting check (skip for channels/groups)
+            if user_id and chat_type == 'private' and is_rate_limited(user_id):
+                return
+            
+            # Process edited messages
+            if 'text' in message:
+                text = message['text']
+                logger.info(f"✏️ WEBHOOK - Contenu édité: {text[:100]}...")
                 
-                # Prevent duplicate processing avec optimisation
-                message_hash = hash(message)
-                if message_hash not in self.processed_messages:
-                    self.processed_messages.add(message_hash)
-                    logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: GÉNÉRATION RAPIDE")
-                    return True, game_number, combination
-                else:
-                    logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ⚠️ Déjà traité")
-                    return False, None, None
-            else:
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: Parenthèse {i+1} a {len(section_symbols)} costumes: {section_symbols}")
-        
-        logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: RÈGLE NON RESPECTÉE - Aucune parenthèse avec 3 costumes. Sections: {parentheses_sections}")
-        return False, None, None
-    
-    def make_prediction(self, game_number: int, combination: str) -> str:
-        """Make a prediction for the next game"""
-        next_game = game_number + 1
-        prediction_text = PREDICTION_MESSAGE.format(numero=next_game)
-        
-        # Store the prediction for later verification
-        self.predictions[next_game] = {
-            'combination': combination,
-            'status': 'pending',
-            'predicted_from': game_number,
-            'verification_count': 0,
-            'message_text': prediction_text
-        }
-        
-        logger.info(f"Made prediction for game {next_game} based on combination {combination}")
-        return prediction_text
-    
-    def count_cards_in_winning_parentheses(self, message: str) -> int:
-        """Count the number of card symbols in the parentheses that has the ✅ symbol"""
-        # Split message at ✅ to find which section won
-        if '✅' not in message:
-            return 0
-            
-        # Find the parentheses after ✅
-        checkmark_pos = message.find('✅')
-        remaining_text = message[checkmark_pos:]
-        
-        # Extract parentheses content after ✅
-        pattern = r'\(([^)]+)\)'
-        match = re.search(pattern, remaining_text)
-        
-        if match:
-            winning_content = match.group(1)
-            # Normalize ❤️ to ♥️ for consistent counting
-            normalized_content = winning_content.replace("❤️", "♥️")
-            card_count = 0
-            for symbol in ["♠️", "♥️", "♦️", "♣️"]:
-                card_count += normalized_content.count(symbol)
-            logger.info(f"Found ✅ winning section: {winning_content}, card count: {card_count}")
-            return card_count
-        
-        return 0
-    
-    def verify_prediction(self, message: str) -> Optional[Dict]:
-        """Verify if a prediction was correct (regular messages)"""
-        return self._verify_prediction_common(message, is_edited=False)
-    
-    def verify_prediction_from_edit(self, message: str) -> Optional[Dict]:
-        """Verify if a prediction was correct from edited message (enhanced verification)"""
-        return self._verify_prediction_common(message, is_edited=True)
-    
-    def _verify_prediction_common(self, message: str, is_edited: bool = False) -> Optional[Dict]:
-        """Common verification logic - ONLY VERIFIES on EDITED messages, checks FIRST parentheses only"""
-        game_number = self.extract_game_number(message)
-        if not game_number:
-            return None
-        
-        logger.info(f"🔍 VÉRIFICATION SEULEMENT - Jeu {game_number} (édité: {is_edited})")
-        
-        # Vérifier TOUTES les prédictions en attente, priorité au jeu exact puis séquentiellement
-        predictions_to_check = []
-        
-        # Synchroniser sent_predictions avec predictions
-        for predicted_game, message_info in self.sent_predictions.items():
-            if predicted_game not in self.predictions:
-                self.predictions[predicted_game] = {
-                    'status': 'pending',
-                    'message_info': message_info
-                }
-            predictions_to_check.append(predicted_game)
-        
-        # Ajouter prédictions existantes
-        for predicted_game in self.predictions.keys():
-            if predicted_game not in predictions_to_check:
-                predictions_to_check.append(predicted_game)
-        
-        # Trier par ordre de priorité : jeu exact d'abord, puis séquentiel
-        predictions_to_check = sorted(predictions_to_check)
-        
-        # VÉRIFICATION SÉQUENTIELLE - Continue jusqu'à trouver une correspondance
-        for predicted_game in predictions_to_check:
-            prediction = self.predictions.get(predicted_game, {})
-            prediction_status = prediction.get('status', 'pending')
-            
-            # Passer les prédictions déjà traitées
-            if prediction_status != 'pending':
-                continue
+                # Skip card prediction if card_predictor is not available
+                if not self.card_predictor:
+                    logger.warning("❌ Card predictor not available")
+                    return
                 
-            verification_offset = game_number - predicted_game
-            logger.info(f"🔍 Vérification prédiction {predicted_game} vs jeu actuel {game_number}, décalage: {verification_offset}")
-            
-            # VÉRIFICATION DANS LA FENÊTRE 0-3 (jeu exact, +1, +2, +3)
-            if 0 <= verification_offset <= 3:
-                has_success_symbol = '✅' in message or '🔰' in message
-                logger.info(f"🔍 VÉRIFICATION - Jeu {game_number}: Symbole succès: {has_success_symbol}, Édité: {is_edited}")
-                logger.info(f"🔍 SYSTÈME DE VÉRIFICATION: Vérifie si jeu prédit {predicted_game} correspond au jeu actuel {game_number}")
+                # Vérifier que c'est du canal autorisé
+                if sender_chat_id != TARGET_CHANNEL_ID:
+                    logger.info(f"🚫 Message édité ignoré - Canal non autorisé: {sender_chat_id}")
+                    return
                 
-                # SYSTÈME DE VÉRIFICATION: SEULEMENT sur messages édités avec symbole succès
-                if has_success_symbol and is_edited:
-                    parentheses_sections = self.extract_card_symbols_from_parentheses(message)
+                logger.info(f"✅ WEBHOOK - Message édité du canal autorisé: {TARGET_CHANNEL_ID}")
+                
+                # TRAITEMENT MESSAGES ÉDITÉS - Les deux systèmes fonctionnent ici
+                if self.card_predictor.has_completion_indicators(text):
+                    logger.info(f"🎯 ÉDITION - Message finalisé détecté, traitement des deux systèmes")
                     
-                    # RÈGLE CRITIQUE: Vérifier UNIQUEMENT le PREMIER parenthèse pour exactement 3 costumes
-                    if len(parentheses_sections) > 0:
-                        first_parentheses_suits = parentheses_sections[0]
-                        first_parentheses_valid = len(first_parentheses_suits) == 3
+                    # SYSTÈME 1: PRÉDICTION AUTOMATIQUE (SEULEMENT sur messages édités)
+                    should_predict, game_number, combination = self.card_predictor.should_predict(text)
+                    
+                    if should_predict and game_number is not None and combination is not None:
+                        prediction = self.card_predictor.make_prediction(game_number, combination)
+                        logger.info(f"🔮 PRÉDICTION depuis ÉDITION: {prediction}")
                         
-                        logger.info(f"🔍 PREMIER parenthèse: {first_parentheses_suits} ({len(first_parentheses_suits)} costumes)")
-                        
-                        if first_parentheses_valid:
-                            # Succès trouvé - déterminer le statut selon le décalage
-                            status_map = {0: '✅0️⃣', 1: '✅1️⃣', 2: '✅2️⃣', 3: '✅3️⃣'}
-                            new_status = status_map[verification_offset]
-                            
-                            logger.info(f"🔍 ✅ VÉRIFICATION RÉUSSIE - PREMIER parenthèse a exactement 3 costumes: {first_parentheses_suits}")
-                            logger.info(f"🔍 RÈGLE VÉRIFICATION RESPECTÉE: Prédiction {predicted_game} trouvée au jeu {game_number} (décalage {verification_offset}) → {new_status}")
-                            
-                            original_message = f"🔵{predicted_game} 🔵3K: statut :⏳"
-                            updated_message = f"🔵{predicted_game} 🔵3K: statut :{new_status}"
-                            
-                            prediction['status'] = 'correct'
-                            prediction['verification_count'] = verification_offset
-                            prediction['final_message'] = updated_message
-                            
-                            logger.info(f"🔍 ✅ Prédiction {predicted_game} VÉRIFIÉE avec succès (décalage {verification_offset})")
-                            logger.info(f"🔍 📝 Message à mettre à jour: '{original_message}' → '{updated_message}'")
-                            logger.info(f"🔍 🛑 ARRÊT de vérification - Succès trouvé pour prédiction {predicted_game}")
-                            
-                            return {
-                                'type': 'update_message',
-                                'predicted_game': predicted_game,
-                                'new_message': updated_message,
-                                'original_message': original_message
+                        # Envoyer la prédiction et stocker pour futures vérifications
+                        sent_message_info = self.send_message(chat_id, prediction)
+                        if sent_message_info and isinstance(sent_message_info, dict) and 'message_id' in sent_message_info:
+                            next_game = game_number + 1
+                            self.card_predictor.sent_predictions[next_game] = {
+                                'chat_id': chat_id,
+                                'message_id': sent_message_info['message_id']
                             }
-                        else:
-                            # Premier parenthèse n'a pas 3 costumes - continuer à vérifier jeux suivants  
-                            logger.info(f"🔍 ⏳ CONTINUE - PREMIER parenthèse a seulement {len(first_parentheses_suits)} costumes: {first_parentheses_suits}")
-                            logger.info(f"🔍 SYSTÈME DE VÉRIFICATION: Prédiction {predicted_game} continue vers jeu suivant")
-                else:
-                    # Pas de symbole de succès ou pas édité - pas de vérification
-                    logger.info(f"🔍 ⏸️ Pas de vérification - Symbole succès: {has_success_symbol}, Édité: {is_edited}")
+                            logger.info(f"📝 Prédiction stockée pour jeu {next_game}")
+                    
+                    # SYSTÈME 2: VÉRIFICATION (SEULEMENT sur messages édités)
+                    verification_result = self.card_predictor.verify_prediction_from_edit(text)
+                    if verification_result:
+                        logger.info(f"🔍 VÉRIFICATION depuis ÉDITION: {verification_result}")
+                        if verification_result['type'] == 'update_message':
+                            # Essayer d'éditer le message original de prédiction
+                            predicted_game = verification_result['predicted_game']
+                            if predicted_game in self.card_predictor.sent_predictions:
+                                message_info = self.card_predictor.sent_predictions[predicted_game]
+                                edit_success = self.edit_message(
+                                    message_info['chat_id'],
+                                    message_info['message_id'],
+                                    verification_result['new_message']
+                                )
+                                if edit_success:
+                                    logger.info(f"✅ Message de prédiction édité pour jeu {predicted_game}")
+                                else:
+                                    self.send_message(chat_id, verification_result['new_message'])
+                            else:
+                                self.send_message(chat_id, verification_result['new_message'])
+                
+                # Gestion des messages temporaires
+                elif self.card_predictor.has_pending_indicators(text):
+                    logger.info(f"⏰ WEBHOOK - Message temporaire détecté, en attente de finalisation")
+                    if message_id:
+                        self.card_predictor.pending_edits[message_id] = {
+                            'original_text': text,
+                            'timestamp': datetime.now()
+                        }
+                
+        except Exception as e:
+            logger.error(f"❌ Error handling edited message via webhook: {e}")
+    
+    def _process_card_message(self, message: Dict[str, Any]) -> None:
+        """Process message for card prediction (works for both regular and edited messages)"""
+        try:
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            sender_chat = message.get('sender_chat', {})
+            sender_chat_id = sender_chat.get('id')
             
-            # Vérifier si on doit marquer comme échec après 4 jeux
-            elif verification_offset >= 4:
-                # Après 4 jeux (0,1,2,3) sans succès, marquer comme échec
-                original_message = f"🔵{predicted_game} 🔵3K: statut :⏳"
-                updated_message = f"🔵{predicted_game} 🔵3K: statut :⭕⭕"
+            # Only process messages from Baccarat Kouamé channel
+            if sender_chat_id != TARGET_CHANNEL_ID:
+                logger.info(f"🚫 Message ignoré - Canal non autorisé: {sender_chat_id} (attendu: {TARGET_CHANNEL_ID})")
+                return
                 
-                prediction['status'] = 'failed'
-                prediction['final_message'] = updated_message
+            if not text or not self.card_predictor:
+                return
                 
-                logger.info(f"🔍 ❌ Prédiction {predicted_game} ÉCHOUÉE - Aucun succès trouvé après 4 jeux (décalages 0-3)")
-                logger.info(f"🔍 🛑 ARRÊT de vérification - Échec confirmé pour prédiction {predicted_game}")
-                return {
-                    'type': 'update_message',
-                    'predicted_game': predicted_game,
-                    'new_message': updated_message,
-                    'original_message': original_message
+            logger.info(f"🎯 Traitement message CANAL AUTORISÉ pour prédiction: {text[:50]}...")
+            logger.info(f"📍 Canal source: {sender_chat_id} | Chat destination: {chat_id}")
+            
+            # IMPORTANT: Les messages normaux ne font PAS de prédiction ni de vérification
+            # Seuls les messages ÉDITÉS déclenchent les systèmes de prédiction et vérification
+            logger.info(f"📨 Message normal - AUCUNE ACTION (prédiction et vérification se font SEULEMENT sur messages édités)")
+            
+            # Store temporary messages with pending indicators
+            if self.card_predictor.has_pending_indicators(text):
+                message_id = message.get('message_id')
+                if message_id:
+                    self.card_predictor.temporary_messages[message_id] = text
+                    logger.info(f"⏰ Message temporaire stocké: {message_id}")
+                
+        except Exception as e:
+            logger.error(f"Error processing card message: {e}")
+    
+    def _process_completed_edit(self, message: Dict[str, Any]) -> None:
+        """Process a message that was edited and now contains completion indicators"""
+        try:
+            chat_id = message['chat']['id']
+            chat_type = message['chat'].get('type', 'private')
+            text = message['text']
+            
+            # Only process in groups/channels
+            if chat_type in ['group', 'supergroup', 'channel'] and self.card_predictor:
+                # Check if we should make a prediction from this completed edit
+                should_predict, game_number, combination = self.card_predictor.should_predict(text)
+                
+                if should_predict and game_number is not None and combination is not None:
+                    prediction = self.card_predictor.make_prediction(game_number, combination)
+                    logger.info(f"Making prediction from completed edit: {prediction}")
+                    
+                    # Send prediction to the chat
+                    self.send_message(chat_id, prediction)
+                
+                # Also check for verification with enhanced logic for edited messages
+                verification_result = self.card_predictor.verify_prediction_from_edit(text)
+                if verification_result:
+                    logger.info(f"Verification from completed edit: {verification_result}")
+                    
+                    if verification_result['type'] == 'update_message':
+                        self.send_message(chat_id, verification_result['new_message'])
+                        
+        except Exception as e:
+            logger.error(f"Error processing completed edit: {e}")
+    
+    def _handle_start_command(self, chat_id: int) -> None:
+        """Handle /start command"""
+        try:
+            self.send_message(chat_id, WELCOME_MESSAGE)
+        except Exception as e:
+            logger.error(f"Error in start command: {e}")
+            self.send_message(chat_id, "❌ Une erreur s'est produite. Veuillez réessayer.")
+    
+    def _handle_deploy_command(self, chat_id: int) -> None:
+        """Handle /deploy command by sending deployment zip file"""
+        try:
+            # Send initial message
+            self.send_message(
+                chat_id, 
+                "🚀 Préparation du fichier de déploiement... Veuillez patienter."
+            )
+            
+            # Check if deployment file exists
+            if not os.path.exists(self.deployment_file_path):
+                self.send_message(
+                    chat_id,
+                    "❌ Fichier de déploiement non trouvé. Contactez l'administrateur."
+                )
+                logger.error(f"Deployment file {self.deployment_file_path} not found")
+                return
+            
+            # Send the file
+            success = self.send_document(chat_id, self.deployment_file_path)
+            
+            if success:
+                self.send_message(
+                    chat_id,
+                    "✅ Fichier de déploiement envoyé avec succès !\n\n"
+                    "📋 Instructions de déploiement :\n"
+                    "1. Téléchargez le fichier zip\n"
+                    "2. Créez un nouveau service sur render.com\n"
+                    "3. Uploadez le zip ou connectez votre repository\n"
+                    "4. Configurez les variables d'environnement :\n"
+                    "   - BOT_TOKEN : Votre token de bot\n"
+                    "   - WEBHOOK_URL : https://votre-app.onrender.com\n"
+                    "   - PORT : 10000\n\n"
+                    "🎯 Votre bot sera déployé automatiquement !"
+                )
+            else:
+                self.send_message(
+                    chat_id,
+                    "❌ Échec de l'envoi du fichier. Réessayez plus tard."
+                )
+                
+        except Exception as e:
+            logger.error(f"Error handling deploy command: {e}")
+            self.send_message(
+                chat_id,
+                "❌ Une erreur s'est produite lors du traitement de votre demande."
+            )
+    
+    def _handle_regular_message(self, message: Dict[str, Any]) -> None:
+        """Handle regular text messages"""
+        try:
+            chat_id = message['chat']['id']
+            chat_type = message['chat'].get('type', 'private')
+            text = message.get('text', '')
+            message_id = message.get('message_id')
+            
+            # In private chats, provide help
+            if chat_type == 'private':
+                self.send_message(
+                    chat_id,
+                    "🎭 Salut ! Je suis le bot de Joker.\n"
+                    "Utilisez /help pour voir mes commandes disponibles.\n\n"
+                    "Ajoutez-moi à un canal pour que je puisse analyser les cartes ! 🎴"
+                )
+            
+            # In groups/channels, analyze for card patterns
+            elif chat_type in ['group', 'supergroup', 'channel'] and self.card_predictor:
+                # Check if this message has pending indicators
+                if message_id and self.card_predictor.should_wait_for_edit(text, message_id):
+                    logger.info(f"Message {message_id} has pending indicators, waiting for edit: {text[:50]}...")
+                    # Don't process for predictions yet, wait for the edit
+                    return
+                
+                # Les messages normaux dans les groupes/canaux ne font PAS de prédiction ni vérification
+                # Seuls les messages ÉDITÉS déclenchent les systèmes
+                logger.info(f"📨 Message normal groupe/canal - AUCUNE ACTION (systèmes actifs seulement sur éditions)")
+                logger.info(f"Group message in {chat_id}: {text[:50]}...")
+                
+        except Exception as e:
+            logger.error(f"Error handling regular message: {e}")
+    
+    def _handle_new_chat_members(self, message: Dict[str, Any]) -> None:
+        """Handle when bot is added to a channel or group"""
+        try:
+            chat_id = message['chat']['id']
+            chat_title = message['chat'].get('title', 'ce chat')
+            
+            for member in message['new_chat_members']:
+                # Check if our bot was added (we can't know our own ID easily in webhook mode)
+                # So we'll just send greeting when any bot is added
+                if member.get('is_bot', False):
+                    logger.info(f"Bot added to chat {chat_id}: {chat_title}")
+                    self.send_message(chat_id, GREETING_MESSAGE)
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error handling new chat members: {e}")
+    
+    def send_message(self, chat_id: int, text: str) -> bool:
+        """Send text message to user"""
+        try:
+            import requests
+            
+            url = f"{self.base_url}/sendMessage"
+            data = {
+                'chat_id': chat_id,
+                'text': text,
+                'parse_mode': 'HTML'
+            }
+            
+            response = requests.post(url, json=data, timeout=10)
+            result = response.json()
+            
+            if result.get('ok'):
+                logger.info(f"Message sent successfully to chat {chat_id}")
+                return result.get('result', {})  # Return message info including message_id
+            else:
+                logger.error(f"Failed to send message: {result}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return False
+    
+    def send_document(self, chat_id: int, file_path: str) -> bool:
+        """Send document file to user"""
+        try:
+            import requests
+            
+            url = f"{self.base_url}/sendDocument"
+            
+            with open(file_path, 'rb') as file:
+                files = {
+                    'document': (os.path.basename(file_path), file, 'application/zip')
                 }
-        
-        logger.info(f"🔍 Aucune prédiction à vérifier pour le jeu {game_number}")
-        return None
-
-# Global instance
-card_predictor = CardPredictor()
+                data = {
+                    'chat_id': chat_id,
+                    'caption': '📦 Package de déploiement pour render.com\n\n🎯 Tout est inclus pour déployer votre bot !'
+                }
+                
+                response = requests.post(url, data=data, files=files, timeout=60)
+                result = response.json()
+                
+                if result.get('ok'):
+                    logger.info(f"Document sent successfully to chat {chat_id}")
+                    return True
+                else:
+                    logger.error(f"Failed to send document: {result}")
+                    return False
+                    
+        except FileNotFoundError:
+            logger.error(f"File not found: {file_path}")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending document: {e}")
+            return False
+    
+    def edit_message(self, chat_id: int, message_id: int, new_text: str) -> bool:
+        """Edit an existing message"""
+        try:
+            import requests
+            
+            url = f"{self.base_url}/editMessageText"
+            data = {
+                'chat_id': chat_id,
+                'message_id': message_id,
+                'text': new_text,
+                'parse_mode': 'HTML'
+            }
+            
+            response = requests.post(url, json=data, timeout=10)
+            result = response.json()
+            
+            if result.get('ok'):
+                logger.info(f"Message edited successfully in chat {chat_id}")
+                return True
+            else:
+                logger.error(f"Failed to edit message: {result}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            return False
