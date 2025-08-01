@@ -236,6 +236,24 @@ class CardPredictor:
         
         return 0
     
+    def count_cards_in_first_parentheses(self, message: str) -> int:
+        """Count the total number of card symbols in the first parentheses"""
+        # Find first parentheses content
+        pattern = r'\(([^)]+)\)'
+        match = re.search(pattern, message)
+        
+        if match:
+            first_content = match.group(1)
+            # Normalize ❤️ to ♥️ for consistent counting
+            normalized_content = first_content.replace("❤️", "♥️")
+            card_count = 0
+            for symbol in ["♠️", "♥️", "♦️", "♣️"]:
+                card_count += normalized_content.count(symbol)
+            logger.info(f"Found first parentheses: {first_content}, card count: {card_count}")
+            return card_count
+        
+        return 0
+    
     def verify_prediction(self, message: str) -> Optional[Dict]:
         """Verify if a prediction was correct (regular messages)"""
         return self._verify_prediction_common(message, is_edited=False)
@@ -292,44 +310,41 @@ class CardPredictor:
                 
                 # SYSTÈME DE VÉRIFICATION: SEULEMENT sur messages édités avec symbole succès
                 if has_success_symbol and is_edited:
-                    parentheses_sections = self.extract_card_symbols_from_parentheses(message)
+                    # RÈGLE CRITIQUE: Vérifier UNIQUEMENT le PREMIER parenthèse pour exactement 3 CARTES TOTALES (peu importe si identiques ou différentes)
+                    first_parentheses_card_count = self.count_cards_in_first_parentheses(message)
+                    first_parentheses_valid = first_parentheses_card_count == 3
                     
-                    # RÈGLE CRITIQUE: Vérifier UNIQUEMENT le PREMIER parenthèse pour exactement 3 costumes
-                    if len(parentheses_sections) > 0:
-                        first_parentheses_suits = parentheses_sections[0]
-                        first_parentheses_valid = len(first_parentheses_suits) == 3
+                    logger.info(f"🔍 PREMIER parenthèse: {first_parentheses_card_count} cartes au total")
+                    
+                    if first_parentheses_valid:
+                        # Succès trouvé - déterminer le statut selon le décalage
+                        status_map = {0: '✅0️⃣', 1: '✅1️⃣', 2: '✅2️⃣', 3: '✅3️⃣'}
+                        new_status = status_map[verification_offset]
                         
-                        logger.info(f"🔍 PREMIER parenthèse: {first_parentheses_suits} ({len(first_parentheses_suits)} costumes)")
+                        logger.info(f"🔍 ✅ VÉRIFICATION RÉUSSIE - PREMIER parenthèse a exactement 3 cartes")
+                        logger.info(f"🔍 RÈGLE VÉRIFICATION RESPECTÉE: Prédiction {predicted_game} trouvée au jeu {game_number} (décalage {verification_offset}) → {new_status}")
                         
-                        if first_parentheses_valid:
-                            # Succès trouvé - déterminer le statut selon le décalage
-                            status_map = {0: '✅0️⃣', 1: '✅1️⃣', 2: '✅2️⃣', 3: '✅3️⃣'}
-                            new_status = status_map[verification_offset]
-                            
-                            logger.info(f"🔍 ✅ VÉRIFICATION RÉUSSIE - PREMIER parenthèse a exactement 3 costumes: {first_parentheses_suits}")
-                            logger.info(f"🔍 RÈGLE VÉRIFICATION RESPECTÉE: Prédiction {predicted_game} trouvée au jeu {game_number} (décalage {verification_offset}) → {new_status}")
-                            
-                            original_message = f"🔵{predicted_game} 🔵3K: statut :⏳"
-                            updated_message = f"🔵{predicted_game} 🔵3K: statut :{new_status}"
-                            
-                            prediction['status'] = 'correct'
-                            prediction['verification_count'] = verification_offset
-                            prediction['final_message'] = updated_message
-                            
-                            logger.info(f"🔍 ✅ Prédiction {predicted_game} VÉRIFIÉE avec succès (décalage {verification_offset})")
-                            logger.info(f"🔍 📝 Message à mettre à jour: '{original_message}' → '{updated_message}'")
-                            logger.info(f"🔍 🛑 ARRÊT de vérification - Succès trouvé pour prédiction {predicted_game}")
-                            
-                            return {
-                                'type': 'update_message',
-                                'predicted_game': predicted_game,
-                                'new_message': updated_message,
-                                'original_message': original_message
-                            }
-                        else:
-                            # Premier parenthèse n'a pas 3 costumes - continuer à vérifier jeux suivants  
-                            logger.info(f"🔍 ⏳ CONTINUE - PREMIER parenthèse a seulement {len(first_parentheses_suits)} costumes: {first_parentheses_suits}")
-                            logger.info(f"🔍 SYSTÈME DE VÉRIFICATION: Prédiction {predicted_game} continue vers jeu suivant")
+                        original_message = f"🔵{predicted_game} 🔵3K: statut :⏳"
+                        updated_message = f"🔵{predicted_game} 🔵3K: statut :{new_status}"
+                        
+                        prediction['status'] = 'correct'
+                        prediction['verification_count'] = verification_offset
+                        prediction['final_message'] = updated_message
+                        
+                        logger.info(f"🔍 ✅ Prédiction {predicted_game} VÉRIFIÉE avec succès (décalage {verification_offset})")
+                        logger.info(f"🔍 📝 Message à mettre à jour: '{original_message}' → '{updated_message}'")
+                        logger.info(f"🔍 🛑 ARRÊT de vérification - Succès trouvé pour prédiction {predicted_game}")
+                        
+                        return {
+                            'type': 'update_message',
+                            'predicted_game': predicted_game,
+                            'new_message': updated_message,
+                            'original_message': original_message
+                        }
+                    else:
+                        # Premier parenthèse n'a pas 3 cartes - continuer à vérifier jeux suivants  
+                        logger.info(f"🔍 ⏳ CONTINUE - PREMIER parenthèse a seulement {first_parentheses_card_count} cartes (besoin de 3)")
+                        logger.info(f"🔍 SYSTÈME DE VÉRIFICATION: Prédiction {predicted_game} continue vers jeu suivant")
                 else:
                     # Pas de symbole de succès ou pas édité - pas de vérification
                     logger.info(f"🔍 ⏸️ Pas de vérification - Symbole succès: {has_success_symbol}, Édité: {is_edited}")
@@ -356,4 +371,4 @@ class CardPredictor:
         return None
 
 # Global instance
-card_predictor = CardPredictor()
+card_predictor = CardPredictor()ctor()
