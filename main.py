@@ -74,10 +74,16 @@ def setup_webhook():
 if __name__ == '__main__':
     # Set up webhook on startup
     setup_webhook()
-    
+
     # Get port from environment (Render.com provides this dynamically)
-    port = int(os.getenv('PORT', 10000))
+    raw_port = os.getenv('PORT', '10000')
+    try:
+        port = int(raw_port.split()[0])  # Prend uniquement le nombre
+    except ValueError:
+        logger.error(f"❌ PORT mal formaté : '{raw_port}'")
+        exit(1)
+
     logger.info(f"🚀 Démarrage serveur sur port {port}")
-    
+
     # Run Flask app optimized for Render.com
     app.run(host='0.0.0.0', port=port, debug=False)
