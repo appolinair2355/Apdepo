@@ -8,8 +8,8 @@ Bot Telegram optimisé pour le déploiement sur Render.com avec système de pré
 ### Variables d'Environnement Requises
 ```
 BOT_TOKEN=7870922727:AAGXEEWNB7zz8M_k8WEyfEmEDMKxoFAaBwM
-WEBHOOK_URL=https://telegram-deployment-bot.onrender.com
-PORT=10000 (automatiquement configuré par Render.com)
+WEBHOOK_URL=https://apdepo-epvr.onrender.com
+PORT=10000 
 ```
 
 ### Configuration Service
