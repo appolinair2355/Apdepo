@@ -145,3 +145,77 @@ class TelegramHandlers:
                 
         except Exception as e:
             logger.error(f"Error handling update: {e}")
+                def _handle_edited_message(self, message: Dict[str, Any]) -> None:
+        """Handle edited messages with enhanced webhook processing for predictions and verification"""
+        try:
+            chat_id = message['chat']['id']
+            chat_type = message['chat'].get('type', 'private')
+            user_id = message.get('from', {}).get('id')
+            message_id = message.get('message_id')
+            sender_chat = message.get('sender_chat', {})
+            sender_chat_id = sender_chat.get('id')
+            
+            logger.info(f"✏️ WEBHOOK - Message édité reçu ID:{message_id} | Chat:{chat_id} | Sender:{sender_chat_id}")
+            
+            # Rate limiting check (skip for channels/groups)
+            if user_id and chat_type == 'private' and is_rate_limited(user_id):
+                return
+            
+            # Process edited messages
+            if 'text' in message:
+                text = message['text']
+                logger.info(f"✏️ WEBHOOK - Contenu édité: {text[:100]}...")
+                
+                # Skip card prediction if card_predictor is not available
+                if not self.card_predictor:
+                    logger.warning("❌ Card predictor not available")
+                    return
+                
+                # Vérifier que c'est du canal autorisé
+                if sender_chat_id != TARGET_CHANNEL_ID:
+                    logger.info(f"🚫 Message édité ignoré - Canal non autorisé: {sender_chat_id}")
+                    return
+                
+                logger.info(f"✅ WEBHOOK - Message édité du canal autorisé: {TARGET_CHANNEL_ID}")
+                
+                # TRAITEMENT MESSAGES ÉDITÉS - Les deux systèmes fonctionnent ici
+                if self.card_predictor.has_completion_indicators(text):
+                    logger.info(f"🎯 ÉDITION - Message finalisé détecté, traitement des deux systèmes")
+                    
+                    # SYSTÈME 1: PRÉDICTION AUTOMATIQUE (SEULEMENT sur messages édités)
+                    should_predict, game_number, combination = self.card_predictor.should_predict(text)
+                    
+                    if should_predict and game_number is not None and combination is not None:
+                        prediction = self.card_predictor.make_prediction(game_number, combination)
+                        logger.info(f"🔮 PRÉDICTION depuis ÉDITION: {prediction}")
+                        
+                        # Envoyer la prédiction et stocker pour futures vérifications
+                        sent_message_info = self.send_message(chat_id, prediction)
+                        if sent_message_info and isinstance(sent_message_info, dict) and 'message_id' in sent_message_info:
+                            next_game = game_number + 1
+                            self.card_predictor.sent_predictions[next_game] = {
+                                'chat_id': chat_id,
+                                'message_id': sent_message_info['message_id']
+                            }
+                            logger.info(f"📝 Prédiction stockée pour jeu {next_game}")
+                    
+                    # SYSTÈME 2: VÉRIFICATION (SEULEMENT sur messages édités)
+                    verification_result = self.card_predictor.verify_prediction_from_edit(text)
+                    if verification_result:
+                        logger.info(f"🔍 VÉRIFICATION depuis ÉDITION: {verification_result}")
+                        if verification_result['type'] == 'update_message':
+                            # Essayer d'éditer le message original de prédiction
+                            predicted_game = verification_result['predicted_game']
+                            if predicted_game in self.card_predictor.sent_predictions:
+                                message_info = self.card_predictor.sent_predictions[predicted_game]
+                                edit_success = self.edit_message(
+                                    message_info['chat_id'],
+                                    message_info['message_id'],
+                                    verification_result['new_message']
+                                )
+                                if edit_success:
+                                    logger.info(f"✅ Message de prédiction édité pour jeu {predicted_game}")
+                                else:
+                                    self.send_message(chat_id, verification_result['new_message'])
+                            else:
+                                self.send_message(chat_id, verification_result['new_message'])
