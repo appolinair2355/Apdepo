@@ -125,9 +125,11 @@ class CardPredictor:
             logger.info(f"Accepting 3 different cards as valid: {combination}")
             return combination
         return None
+    
     def should_predict(self, message: str) -> Tuple[bool, Optional[int], Optional[str]]:
         """
         SYSTÈME DE PRÉDICTION - Détermine si on doit faire une NOUVELLE prédiction (+1)
+        RÈGLE MODIFIÉE : Regarde UNIQUEMENT le premier parenthèse pour 3 costumes
         Returns: (should_predict, game_number, card_combination)
         """
         # Extract game number
@@ -168,28 +170,28 @@ class CardPredictor:
             logger.info(f"🔮 Jeu {game_number}: Aucune parenthèse trouvée")
             return False, None, None
         
-        # SYSTÈME DE PRÉDICTION: Check if ANY parentheses section has exactly 3 different costumes
-        # Optimisation : vérification rapide pour éviter trop de logs
-        for i, section_symbols in enumerate(parentheses_sections):
-            if len(section_symbols) == 3:
-                # Found a section with 3 different costumes - GENERATE PREDICTION FOR NEXT GAME
-                combination = ''.join(sorted(section_symbols))
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ✅ 3 costumes trouvés dans parenthèse {i+1}: {section_symbols}")
-                logger.info(f"🔮 RÈGLE PRÉDICTION RESPECTÉE: N'importe quelle parenthèse avec 3 costumes → génère prédiction pour jeu {game_number + 1}")
-                
-                # Prevent duplicate processing avec optimisation
-                message_hash = hash(message)
-                if message_hash not in self.processed_messages:
-                    self.processed_messages.add(message_hash)
-                    logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: GÉNÉRATION RAPIDE")
-                    return True, game_number, combination
-                else:
-                    logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ⚠️ Déjà traité")
-                    return False, None, None
+        # SYSTÈME DE PRÉDICTION MODIFIÉ : Check if FIRST parentheses section has exactly 3 different costumes
+        if len(parentheses_sections) > 0 and len(parentheses_sections[0]) == 3:
+            # Found FIRST section with 3 different costumes - GENERATE PREDICTION FOR NEXT GAME
+            first_section_symbols = parentheses_sections[0]
+            combination = ''.join(sorted(first_section_symbols))
+            logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ✅ 3 costumes trouvés dans PREMIER parenthèse: {first_section_symbols}")
+            logger.info(f"🔮 RÈGLE PRÉDICTION RESPECTÉE: PREMIER parenthèse avec 3 costumes → génère prédiction pour jeu {game_number + 1}")
+            
+            # Prevent duplicate processing avec optimisation
+            message_hash = hash(message)
+            if message_hash not in self.processed_messages:
+                self.processed_messages.add(message_hash)
+                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: GÉNÉRATION RAPIDE")
+                return True, game_number, combination
             else:
-                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: Parenthèse {i+1} a {len(section_symbols)} costumes: {section_symbols}")
+                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: ⚠️ Déjà traité")
+                return False, None, None
+        else:
+            if len(parentheses_sections) > 0:
+                logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: PREMIER parenthèse a {len(parentheses_sections[0])} costumes: {parentheses_sections[0]}")
+            logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: RÈGLE NON RESPECTÉE - PREMIER parenthèse n'a pas 3 costumes")
         
-        logger.info(f"🔮 PRÉDICTION - Jeu {game_number}: RÈGLE NON RESPECTÉE - Aucune parenthèse avec 3 costumes. Sections: {parentheses_sections}")
         return False, None, None
     
     def make_prediction(self, game_number: int, combination: str) -> str:
